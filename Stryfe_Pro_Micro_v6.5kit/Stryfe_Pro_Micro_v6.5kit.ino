@@ -4,18 +4,19 @@
 int BatteryS = 3;
 #define MotorKV 3000 
 int MaxMotorSpeed = 2000; 
-#define LOW_SPEED_REV 40
+#define LOW_SPEED_REV 45
 #define HIGH_SPEED_REV 100
 
-#define PIN_REVTRIGGER 14 
+#define PIN_REVTRIGGER 2 
 #define PIN_REVDETECTOR A2
 #define PIN_MAINMOTOR1 9  
 #define PIN_MAINMOTOR2 10
-#define PIN_BATTERYDETECT A3
-#define PIN_JAMDOOR 20 
+#define PIN_BATTERYDETECT A1
+#define PIN_JAMDOOR 20
+#define PIN_SPEEDPOT A3
 
 // Anything more than this is detected as pulling the 2-stage trigger
-#define REV_DETECTOR_THRESHOLD (float)1.0
+#define REV_DETECTOR_THRESHOLD (float)0.7
 
 // Servo Objects
 Servo MainMotor1; 
@@ -107,6 +108,9 @@ void setup()
   // Set up rev detection circuit
   pinMode( PIN_REVDETECTOR, INPUT );
 
+  // Set up the pot
+  pinMode( PIN_SPEEDPOT, INPUT );
+
   Serial.println( F("Initialising ESC") );
   // Set up motors
   MainMotor1.attach(PIN_MAINMOTOR1);
@@ -153,7 +157,7 @@ void ProcessButtons()
 
   float SensorValue = analogRead( PIN_REVDETECTOR );
   float CurrentVoltage = 0.0;
-  CurrentVoltage = ((SensorValue * 5.0)  / 1024.0 * (float)((47 + 22) / 22)) + BATTERY_CALFACTOR;  // Voltage dividor - 47k and 10k
+  CurrentVoltage = ((SensorValue * 5.0)  / 1024.0 * (float)((47 + 10) / 10)) + BATTERY_CALFACTOR;  // Voltage dividor - 47k and 10k
 
   if( CurrentVoltage <= REV_DETECTOR_THRESHOLD)
   {
@@ -163,7 +167,9 @@ void ProcessButtons()
   {
     DetectingRev = true;
   }
-  
+
+  if( DetectingRev )
+    Serial.println( CurrentVoltage );
 }
 
 /*
@@ -271,15 +277,20 @@ void RevUp()
 void ProcessManualSpeedControl()
 {
   static byte LastSetMaxSpeed = 100;
+  int CurrentPotInput = 0;
 
   if( CommandRev )
   {
-    if( RevTriggerPressed && DetectingRev ) // Detected both trigger and rev trigger
+    if( RevTriggerPressed ) // Detected both trigger and rev trigger
     {
-      SetMaxSpeed = HIGH_SPEED_REV;
+      Serial.println( "HI" );
+      CurrentPotInput = analogRead( PIN_SPEEDPOT );
+      SetMaxSpeed = map( CurrentPotInput, 0, 1023, 35, 110 ); // Pull out of bounds so that the ends of the pot are zones.
+      //SetMaxSpeed = HIGH_SPEED_REV;
     }
     else if( DetectingRev ) // Detected trigger pull only.
     {
+      Serial.println( "LO" );
       SetMaxSpeed = LOW_SPEED_REV;
     }
       
@@ -287,7 +298,7 @@ void ProcessManualSpeedControl()
 
   if( LastSetMaxSpeed == SetMaxSpeed ) return; // Speed hasn't changed
 
-  SetMaxSpeed = constrain( SetMaxSpeed, 40, 100 ); // Constrain between 10% and 100%
+  SetMaxSpeed = constrain( SetMaxSpeed, 45, 100 ); // Constrain between 10% and 100%
 
   MaxMotorSpeed = map( SetMaxSpeed, 0, 100, MinMotorSpeed, MaxMotorSpeedCeiling );  // Keep processing against the max theoretical motor speed.
 
@@ -404,7 +415,7 @@ void ProcessBatteryMonitor()
   }
   else
   {
-    BatteryCurrentVoltage = (((float)SampleAverage / (float)CollectedSamples * 5.0)  / 1024.0 * (float)((47 + 22) / 22)) + BATTERY_CALFACTOR;  // Voltage dividor - 47k and 10k
+    BatteryCurrentVoltage = (((float)SampleAverage / (float)CollectedSamples * 5.0)  / 1024.0 * (float)((47 + 10) / 10)) + BATTERY_CALFACTOR;  // Voltage dividor - 47k and 10k
     if( BatteryCurrentVoltage < BatteryMinVoltage )
     {
       if( BatteryCurrentVoltage > 1.0 ) // If the current voltage is 0, we are probably debugging
@@ -423,6 +434,8 @@ void ProcessBatteryMonitor()
     CollectedSamples = 0;
     SampleAverage = 0;
   }
+
+  //Serial.println( BatteryFlat );
 }
 
 void ProcessSystemMode()
