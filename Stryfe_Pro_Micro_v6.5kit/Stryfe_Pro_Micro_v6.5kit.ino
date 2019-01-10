@@ -3,7 +3,6 @@
 
 int BatteryS = 3;
 #define MotorKV 3000 
-int MaxMotorSpeed = 2000; 
 #define LOW_SPEED_REV 45
 #define HIGH_SPEED_REV 100
 
@@ -12,7 +11,7 @@ int MaxMotorSpeed = 2000;
 #define PIN_MAINMOTOR1 9  
 #define PIN_MAINMOTOR2 10
 #define PIN_BATTERYDETECT A1
-#define PIN_JAMDOOR 20
+//#define PIN_JAMDOOR 20
 #define PIN_SPEEDPOT A3
 
 // Anything more than this is detected as pulling the 2-stage trigger
@@ -22,45 +21,41 @@ int MaxMotorSpeed = 2000;
 Servo MainMotor1; 
 Servo MainMotor2;
 
+/*
+ * New style acceleration code
+ */
 
-// Acceleration Time (Not used - go max)
-long AccelerateTime = 0; //ms. Start with 200ms for 4s /// Not used
-
-// Deceleration Time
-long DecelerateTime = 3000; //ms IF you have a bLHeli_32 OR S set this to 1000 otherwise 6000
-
-// Servo Floor Speed
-long MinMotorSpeed = 1000;
-
-// Current Motor Speed
-long CurrentMotorSpeed = MinMotorSpeed;
-
-// Use this as a placeholder when motor direction changes before reaching end travel, and when lowering max speed 
-long InterruptedMotorSpeed = 0;
-
-// Speed Adjustment
-long MaxMotorSpeedCeiling; //use this to remember the absolute max motor speed.
+// Motor Controls
+#define MOTOR_SPINUP_LAG 100 // How long we give the motors before we know that have spun up.
+#define MOTOR_SPINDOWN_3S 4000
+#define MOTOR_SPINDOWN_4S 6000
+#define MOTOR_SPINUP_3S 0
+#define MOTOR_SPINUP_4S 0
+int MaxMotorSpeed = 2000;
+int DecelerateTime = 0;
+int AccelerateTime = 0;
+int MotorRampUpPerMS = 0;
+int MotorRampDownPerMS = 0;
+int MinMotorSpeed = 1000;
+int CurrentMotorSpeed = MinMotorSpeed;
+int TargetMotorSpeed = MinMotorSpeed;
+bool MotorsEnabled = false;
 byte SetMaxSpeed = 100; // in percent.
+unsigned long TimeLastMotorSpeedChanged = 0;
+#define COMMAND_REV_NONE 0
+#define COMMAND_REV_HALF 1
+#define COMMAND_REV_FULL 2
+int CommandRev = COMMAND_REV_NONE;
+int PrevCommandRev = COMMAND_REV_NONE;
 
-// Track changes to Rev Trigger State
-unsigned long TimeLastTriggerChanged = 0;
-unsigned long TimeLastTriggerPressed = 0;
-unsigned long TimeLastTriggerReleased = 0;
 
 // Physical Switch Status
 bool RevTriggerPressed = false; // Rev Trigger is Depressed
-bool JamDoorPressed = false; // Mag Release is Depressed
 bool DetectingRev = false; // Full auto kit is revving
-
-// Main Motor Command
-bool CommandRev = false;
-bool PrevCommandRev = false; // So we can keep track of changes
 
 // Debounce Variables
 #define DebounceWindow 5 // Debounce Window = 5ms
 Bounce RevTriggerBounce = Bounce();
-Bounce JamDoorBounce = Bounce();
-
 
 // Battery Monitoring
 #define BATTERY_2S_MIN 6.0
@@ -96,10 +91,6 @@ void setup()
   RevTriggerBounce.attach( PIN_REVTRIGGER );
   RevTriggerBounce.interval( DebounceWindow );
 
-  pinMode(PIN_JAMDOOR, INPUT_PULLUP);
-  JamDoorBounce.attach( PIN_JAMDOOR );
-  JamDoorBounce.interval( DebounceWindow );  
-
   Serial.println( F("Debouncing Configured") );
 
   // Set up battery monitoring
@@ -118,29 +109,72 @@ void setup()
   // Arm ESC's
   MainMotor1.writeMicroseconds(MinMotorSpeed);
   MainMotor2.writeMicroseconds(MinMotorSpeed);
-  delay(7000);   // Wait for ESC to initialise (7 seconds)
+  delay(3000);   // Wait for ESC to initialise (7 seconds)
   Serial.println( F("ESC Initialised") );
 
-  MaxMotorSpeedCeiling = MaxMotorSpeed;
-  MotorRPM = BatteryS * MotorKV * 3.7;
-  DecelerateTime = (float)(DecelerateTime) * (MotorRPM / 33300);
-  if( BatteryS == 2 )
-  {
-    BatteryMinVoltage = BATTERY_2S_MIN;
-    BatteryMaxVoltage = BATTERY_2S_MAX;
-  }
-  else if( BatteryS == 3 )
+  if( BatteryS == 3 )
   {
     BatteryMinVoltage = BATTERY_3S_MIN;
     BatteryMaxVoltage = BATTERY_3S_MAX;
+
+    DecelerateTime = MOTOR_SPINDOWN_3S;
+    AccelerateTime = MOTOR_SPINUP_3S;    
   }
   else
   {
     BatteryMinVoltage = BATTERY_4S_MIN;
     BatteryMaxVoltage = BATTERY_4S_MAX;    
+
+    DecelerateTime = MOTOR_SPINDOWN_4S;
+    AccelerateTime = MOTOR_SPINUP_4S;    
   }
 
+  CalculateRampRates();
+
   Serial.println( F("Booted.") );
+}
+
+/*
+ * This is a boot time init sub to calcualte the Acceleration and 
+ * deceleration ramp rates of the motors.
+ * 
+ */
+void CalculateRampRates()
+{
+  long SpeedRange = (long)(MaxMotorSpeed - MinMotorSpeed) * 1000; // Multiply by 1000 to give some resolution due to integer calculations
+  if( AccelerateTime == 0 )
+  {
+    MotorRampUpPerMS = SpeedRange;  // For instant acceleration
+  }
+  else
+  {
+    MotorRampUpPerMS = SpeedRange / AccelerateTime;  // Use when Accelerating
+  }
+
+  if( DecelerateTime == 0 )
+  {
+    MotorRampDownPerMS = SpeedRange;  // For instant acceleration
+  }
+  else
+  {
+    MotorRampDownPerMS = SpeedRange / DecelerateTime;  // Use when Decelerating
+  }  
+
+
+  Serial.print( "Ramp Up per MS = " );
+  Serial.println( MotorRampUpPerMS );
+
+  Serial.print( "Ramp Down per MS = " );
+  Serial.println( MotorRampDownPerMS );
+
+  Serial.print( "AccelerateTime = " );
+  Serial.println( AccelerateTime );
+
+  Serial.print( "DecelerateTime = " );
+  Serial.println( DecelerateTime );
+
+  Serial.print( "SpeedRange = " );
+  Serial.println( SpeedRange );
 }
 
 
@@ -152,12 +186,12 @@ void ProcessButtons()
   RevTriggerBounce.update(); // Update the pin bounce state
   RevTriggerPressed = !(RevTriggerBounce.read());
 
-  JamDoorBounce.update(); // Update the pin bounce state
-  JamDoorPressed = !(JamDoorBounce.read()); 
+//  JamDoorBounce.update(); // Update the pin bounce state
+//  JamDoorPressed = !(JamDoorBounce.read()); 
 
   float SensorValue = analogRead( PIN_REVDETECTOR );
   float CurrentVoltage = 0.0;
-  CurrentVoltage = ((SensorValue * 5.0)  / 1024.0 * (float)((47 + 10) / 10)) + BATTERY_CALFACTOR;  // Voltage dividor - 47k and 10k
+  CurrentVoltage = ((SensorValue * 5.0)  / 1024.0 * (float)((47.0 + 10.0) / 10.0)) + BATTERY_CALFACTOR;  // Voltage dividor - 47k and 10k
 
   if( CurrentVoltage <= REV_DETECTOR_THRESHOLD)
   {
@@ -168,167 +202,62 @@ void ProcessButtons()
     DetectingRev = true;
   }
 
-  if( DetectingRev )
-    Serial.println( CurrentVoltage );
+  //if( DetectingRev )
+    //Serial.println( CurrentVoltage );
 }
 
-/*
- * Slow the main motors to 0
- */
-void RevDown()// RevDown 
-{
-  // Don't do anything if the motor is already stopped.
-  if( CurrentMotorSpeed == MinMotorSpeed )
-  {
-    return;
-  }
-
-  if( DecelerateTime > 0 )
-  {
-    unsigned long CurrentTime = millis(); // Need a base time to calcualte from
-    long SpeedRange = (MaxMotorSpeedCeiling - MinMotorSpeed) * 1000; // Multiply by 1000 to give some resolution due to integer calculations
-    long RampDownPerMS = SpeedRange / DecelerateTime;  // This is the number of units per S that we need to subtract
-    unsigned long ActualDecelerationMS = CurrentTime - TimeLastTriggerReleased; // The number of MS in deceleration
-    int NewMotorSpeed = MaxMotorSpeed - (ActualDecelerationMS * RampDownPerMS / 1000); // Calclate the new motor speed..
-
-    // Now we need to take into account acceleration while braking
-    if( NewMotorSpeed > CurrentMotorSpeed ) 
-    {
-      if( InterruptedMotorSpeed == 0 ) // Save the current motor speed for later comparison
-      {
-        InterruptedMotorSpeed = CurrentMotorSpeed;
-        NewMotorSpeed = CurrentMotorSpeed;
-      }
-      else
-      {
-        NewMotorSpeed = InterruptedMotorSpeed - (MaxMotorSpeed - NewMotorSpeed);
-      }      
-    }
-
-    if( NewMotorSpeed < MinMotorSpeed ) NewMotorSpeed = MinMotorSpeed; // Just in case we overshoot...
-
-    if( (NewMotorSpeed - MinMotorSpeed) < (int)((float)MinMotorSpeed / 100 * 5) )
-    {
-      NewMotorSpeed = MinMotorSpeed; // We are within 5% of total stop, so just shut it down.
-    }
-    
-    CurrentMotorSpeed = NewMotorSpeed;
-  }
-  else
-  {
-    // Immediately stop the motor
-    CurrentMotorSpeed = MinMotorSpeed;
-  }
-}
-
-/*
- * Run the main motors.
- */
-void RevUp()
-{
-
-  // Don't do anything if the motor is already running.
-  if( CurrentMotorSpeed == MaxMotorSpeed )
-  {
-    return;
-  }
-
-  if( AccelerateTime > 0 )
-  {
-    unsigned long CurrentTime = millis(); // Need a base time to calcualte from
-    long SpeedRange = (MaxMotorSpeedCeiling - MinMotorSpeed) * 1000; // Multiply by 1000 to give some resolution due to integer calculations
-    long RampUpPerMS = SpeedRange / AccelerateTime;  // This is the number of units per S that we need to subtract
-    unsigned long ActualAccelerationMS = CurrentTime - TimeLastTriggerPressed; // The number of MS in acceleration
-    int NewMotorSpeed = MinMotorSpeed + (ActualAccelerationMS * RampUpPerMS / 1000); // Calclate the new motor speed..
-
-    // Now we need to take into account acceleration while braking
-    if( NewMotorSpeed < CurrentMotorSpeed ) 
-    {
-      if( InterruptedMotorSpeed == 0 ) // Save the current motor speed for later comparison
-      {
-        InterruptedMotorSpeed = CurrentMotorSpeed;
-        NewMotorSpeed = CurrentMotorSpeed;
-      }
-      else
-      {
-        NewMotorSpeed = NewMotorSpeed - MinMotorSpeed + InterruptedMotorSpeed;
-      }
-    }
-
-    if( NewMotorSpeed > MaxMotorSpeed ) NewMotorSpeed = MaxMotorSpeed; // Just in case we overshot...
-
-    if( (NewMotorSpeed - MaxMotorSpeed) > (int)((float)MaxMotorSpeed / 100 * 95) )
-    {
-      NewMotorSpeed = MaxMotorSpeed; // We are within 5% of total full, so just wind it open.
-    }
-    
-    CurrentMotorSpeed = NewMotorSpeed;
-  }
-  else
-  {
-    // Immediately hit the motor
-    CurrentMotorSpeed = MaxMotorSpeed;
-  }
-}
 
 /*
  * Account for changes to the rotary encoder and feed in a new max motor speed.
  */
-void ProcessManualSpeedControl()
+// We need to set the Target Motor Speed here.
+void ProcessSpeedControl()
 {
   static byte LastSetMaxSpeed = 100;
   int CurrentPotInput = 0;
 
-  if( CommandRev )
+  if( CommandRev == COMMAND_REV_HALF ) SetMaxSpeed = LOW_SPEED_REV;
+  if( CommandRev == COMMAND_REV_FULL ) 
   {
-    if( RevTriggerPressed ) // Detected both trigger and rev trigger
-    {
-      Serial.println( "HI" );
-      CurrentPotInput = analogRead( PIN_SPEEDPOT );
-      SetMaxSpeed = map( CurrentPotInput, 0, 1023, 35, 110 ); // Pull out of bounds so that the ends of the pot are zones.
-      //SetMaxSpeed = HIGH_SPEED_REV;
-    }
-    else if( DetectingRev ) // Detected trigger pull only.
-    {
-      Serial.println( "LO" );
-      SetMaxSpeed = LOW_SPEED_REV;
-    }
-      
+    CurrentPotInput = analogRead( PIN_SPEEDPOT );
+    SetMaxSpeed = map( CurrentPotInput, 0, 1023, 35, 110 ); // Pull out of bounds so that the ends of the pot are zones.
+    //SetMaxSpeed = MotorSpeedFull;
   }
+  if( CommandRev == COMMAND_REV_NONE ) SetMaxSpeed = 0;
 
   if( LastSetMaxSpeed == SetMaxSpeed ) return; // Speed hasn't changed
 
-  SetMaxSpeed = constrain( SetMaxSpeed, 45, 100 ); // Constrain between 10% and 100%
-
-  MaxMotorSpeed = map( SetMaxSpeed, 0, 100, MinMotorSpeed, MaxMotorSpeedCeiling );  // Keep processing against the max theoretical motor speed.
+  if( CommandRev > COMMAND_REV_NONE ) 
+  {
+    SetMaxSpeed = constrain( SetMaxSpeed, 30, 100 ); // Constrain between 30% and 100%
+  }
+  
+  TargetMotorSpeed = map( SetMaxSpeed, 0, 100, MinMotorSpeed, MaxMotorSpeed );  // Find out our new target speed.
 
   LastSetMaxSpeed = SetMaxSpeed;
-
-  // Need to simulate pressing the trigger to get the smooth ramping
-  if( CommandRev ) 
-  {
-    TimeLastTriggerPressed = millis();   
-    InterruptedMotorSpeed = 0;
-  }
 
   Serial.print( F("New max speed % = ") );
   Serial.println( SetMaxSpeed );
 
-}
+  Serial.print( F("New target speed = ") );
+  Serial.println( TargetMotorSpeed );
+
+
+  Serial.print( F("CommandRev = ") );
+  Serial.println( CommandRev );
+  
+} 
 
 void ProcessRevCommand()
 {
-  /*
-  static bool PreviousRevTriggerPressed = false; // Keep track of the human input
 
-  if( PreviousRevTriggerPressed != RevTriggerPressed )
-  {
-    // Human has taken control - disengage autopilot
-    PreviousRevTriggerPressed = RevTriggerPressed;
-  }
-  */
-
-  CommandRev = ( RevTriggerPressed || DetectingRev ); // Accept the trigger input 
+  if( RevTriggerPressed )
+    CommandRev = COMMAND_REV_FULL;
+  else if( DetectingRev )
+    CommandRev = COMMAND_REV_HALF;
+  else
+    CommandRev = COMMAND_REV_NONE;
+  
 }
 
 void loop() 
@@ -344,36 +273,31 @@ void loop()
     // Perform command logic
     ProcessRevCommand();   
   } 
+  else
+  {
+    // Decelerater the motors
+    CommandRev = COMMAND_REV_NONE;
+    Serial.print( "CurrentSystemMode = ");
+    Serial.println( CurrentSystemMode );
+  }
 
   // Calculate new timing variables
-  if( CommandRev != PrevCommandRev )
+
+  if( PrevCommandRev != CommandRev )
   {
-    InterruptedMotorSpeed = 0; // Reset the interrupted motor speed
-    TimeLastTriggerChanged = millis();
+    TimeLastMotorSpeedChanged = millis();
     PrevCommandRev = CommandRev;
-    if( CommandRev )  // Was depressed, now pressed
-    {
-      TimeLastTriggerPressed = TimeLastTriggerChanged;
-    }
-    else // Was pressed, now depressed
-    {
-      TimeLastTriggerReleased = TimeLastTriggerChanged;
-    }
   }
+  
+  //ProcessManualSpeedControl();
 
-  ProcessManualSpeedControl();
-
-  // Command main motors
-  if( CommandRev ) // Commanding the motors to spin
-  {
-    RevUp();
-  }
-  else // Commanding the motors to decelerate
-  {
-    RevDown();
-  }  
-
+  // Process speed control  
+  ProcessSpeedControl();
+  // Calcualte the new motor speed
+  ProcessMotorSpeed();
+  // Send the speed to the ESC
   ProcessMainMotors();
+
 }
 
 /*
@@ -391,6 +315,55 @@ void ProcessMainMotors()
     Serial.println(CurrentMotorSpeed);
 
     PreviousMotorSpeed = CurrentMotorSpeed;
+  }
+}
+
+/*
+ * Run the main motors.
+ */
+void ProcessMotorSpeed()
+{
+  // Don't do anything if the motor is already running at the desired speed.
+  if( CurrentMotorSpeed == TargetMotorSpeed )
+  {
+    return;
+  }
+
+  unsigned long CurrentTime = millis(); // Need a base time to calcualte from
+  unsigned long MSElapsed = CurrentTime - TimeLastMotorSpeedChanged;
+  if( MSElapsed == 0 ) // No meaningful time has elapsed, so speed will not change
+  {
+    return;
+  }
+  if( CurrentMotorSpeed < TargetMotorSpeed )
+  {
+    int SpeedDelta = (MSElapsed * MotorRampUpPerMS / 1000);
+    if( SpeedDelta < 1 ) return; // Not enough cycles have passed to make an appreciable difference to speed.    
+    int NewMotorSpeed = CurrentMotorSpeed + SpeedDelta; // Calclate the new motor speed..
+
+    // If it's within 1% (which is 10) of target, then just set it
+    if( NewMotorSpeed + 10 >= TargetMotorSpeed )
+    {
+      NewMotorSpeed = TargetMotorSpeed;
+    }
+
+    TimeLastMotorSpeedChanged = CurrentTime;
+    CurrentMotorSpeed = NewMotorSpeed;
+  }
+  if( CurrentMotorSpeed > TargetMotorSpeed )
+  {
+    int SpeedDelta = (MSElapsed * MotorRampDownPerMS / 1000);
+    if( SpeedDelta < 1 ) return; // Not enough cycles have passed to make an appreciable difference to speed.
+    int NewMotorSpeed = CurrentMotorSpeed - SpeedDelta; // Calclate the new motor speed..
+
+    // If it's within 1% (which is 10) of target, then just set it
+    if( NewMotorSpeed - 10 <= TargetMotorSpeed )
+    {
+      NewMotorSpeed = TargetMotorSpeed;
+    }
+
+    TimeLastMotorSpeedChanged = CurrentTime;
+    CurrentMotorSpeed = NewMotorSpeed;
   }
 }
 
@@ -415,7 +388,7 @@ void ProcessBatteryMonitor()
   }
   else
   {
-    BatteryCurrentVoltage = (((float)SampleAverage / (float)CollectedSamples * 5.0)  / 1024.0 * (float)((47 + 10) / 10)) + BATTERY_CALFACTOR;  // Voltage dividor - 47k and 10k
+    BatteryCurrentVoltage = (((float)SampleAverage / (float)CollectedSamples * 5.0)  / 1024.0 * (float)((47.0 + 10.0) / 10.0)) + BATTERY_CALFACTOR;  // Voltage dividor - 47k and 10k
     if( BatteryCurrentVoltage < BatteryMinVoltage )
     {
       if( BatteryCurrentVoltage > 1.0 ) // If the current voltage is 0, we are probably debugging
@@ -440,12 +413,6 @@ void ProcessBatteryMonitor()
 
 void ProcessSystemMode()
 {
-  if( !JamDoorPressed ) // Jam Door Open
-  {
-    CurrentSystemMode = MODE_CONFIG;
-    return;
-  }
-
   if( BatteryFlat ) // Battery low
   {
     CurrentSystemMode = MODE_LOWBATTERY;
